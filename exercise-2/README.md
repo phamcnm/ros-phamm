@@ -1,47 +1,39 @@
-# Template: template-ros
+# Exercise 2
 
-This template provides a boilerplate repository
-for developing ROS-based software in Duckietown.
+The goal of this exercise is to learn to use ROS to control the movements of a Duckiebot. All the code to perform requested functions on the DuckieBot for this exercise is can be found in [packages/](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/). Details of each package is below
 
-**NOTE:** If you want to develop software that does not use
-ROS, check out [this template](https://github.com/duckietown/template-basic).
+### Commands
+replace `MY_ROBOT` with `csc22936` to run our Duckiebot.
+#### 1. build docker image directly on robot
+`dts devel build -f -H MY_ROBOT.local`
+#### 2. run the program through launchers file, based on one of the package below
+`dts devel run -R ROBOT_NAME -L [LAUNCHER]`
 
+### Packages
 
-## How to use it
+#### [pubsub](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/pubsub/src/)
+Let a publisher and subscriber communicate with each other 
+`dts devel run -H ROBOT_NAME -L my-subscriber`
+`dts devel run -H ROBOT_NAME -L my-publisher -n publisher`
 
-### 1. Fork this repository
+#### [camera](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/camera/src/camera_reader_node.py)
+Customize and Annotate camera image
+`dts devel run -R ROBOT_NAME -L camera-reader`
 
-Use the fork button in the top-right corner of the github page to fork this template repository.
+#### [drive_back_and_forth](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/drive_back_and_forth/src/drive.py)
+Let Duckiebot to drive forwards and backwards 1.25 meters
+`dts devel run -R ROBOT_NAME -L drive`
 
+#### [rotate](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/rotate/src/rotate.py)
+Let Duckiebot to rotate 90 clockwise then 90 counter-clockwise
+`dts devel run -R ROBOT_NAME -L rotate`
 
-### 2. Create a new repository
+#### [drive-d](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/drive_d/src/drive_d.py)
+Let Duckiebot travel in a D shape using LEDs to signal state
+`dts devel run -R ROBOT_NAME -L drive-d`
 
-Create a new repository on github.com while
-specifying the newly forked template repository as
-a template for your new repository.
+#### 2. run the program
+`docker -H MY_ROBOT.local run -it --rm --net=host duckietown/my-program:latest-arm32v7`
 
-
-### 3. Define dependencies
-
-List the dependencies in the files `dependencies-apt.txt` and
-`dependencies-py3.txt` (apt packages and pip packages respectively).
-
-
-### 4. Place your code
-
-Place your code in the directory `/packages/` of
-your new repository.
-
-
-### 5. Setup launchers
-
-The directory `/launchers` can contain as many launchers (launching scripts)
-as you want. A default launcher called `default.sh` must always be present.
-
-If you create an executable script (i.e., a file with a valid shebang statement)
-a launcher will be created for it. For example, the script file 
-`/launchers/my-launcher.sh` will be available inside the Docker image as the binary
-`dt-launcher-my-launcher`.
-
-When launching a new container, you can simply provide `dt-launcher-my-launcher` as
-command.
+### Group members
+Minh Pham, Alex Liu

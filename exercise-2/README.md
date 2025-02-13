@@ -1,6 +1,6 @@
 # Exercise 2
 
-The goal of this exercise is to learn to use ROS to control the movements of a Duckiebot. All the code to perform requested functions on the DuckieBot for this exercise is can be found in [packages/](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/). Details of each package is below.
+The goal of this exercise is to learn to use ROS to control the movements of a Duckiebot. All the code to perform requested functions on the DuckieBot for this exercise can be found in [packages/](https://github.com/phamcnm/ros-phamm/blob/main/exercise-2/packages/). Details of each package is below.
 
 ### Commands
 Replace `MY_ROBOT` with `csc22936` to run our Duckiebot.

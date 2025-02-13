@@ -4,7 +4,7 @@
   <description>
   This package contains the code for doing drive_back_and_forth with wheel encoders.
   </description>
-  <maintainer email="minh.pham@ualberta.ca">Minh Pham</maintainer>
+  <maintainer email="minh.pham@ualberta.ca">Alex Liu, Minh Pham</maintainer>
   <license>None</license>
 
   <buildtool_depend>catkin</buildtool_depend>

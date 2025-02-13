@@ -1,10 +1,10 @@
 <package>
-  <name>odometry</name>
+  <name>camera</name>
   <version>0.1.0</version>
   <description>
   This package contains the code for doing odometry with wheel encoders.
   </description>
-  <maintainer email="minh.pham@ualberta.ca">Minh Pham</maintainer>
+  <maintainer email="minh.pham@ualberta.ca">Alex Liu, Minh Pham</maintainer>
   <license>None</license>
 
   <buildtool_depend>catkin</buildtool_depend>

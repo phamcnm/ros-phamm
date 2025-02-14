@@ -1,5 +1,5 @@
 <package>
-  <name>drive_back_and_forth</name>
+  <name>reverse_park</name>
   <version>0.1.0</version>
   <description>
   This package contains the code for doing drive_back_and_forth with wheel encoders.

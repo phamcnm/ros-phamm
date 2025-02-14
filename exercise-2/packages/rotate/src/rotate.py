@@ -6,9 +6,9 @@ from duckietown.dtros import DTROS, NodeType
 from duckietown_msgs.msg import WheelEncoderStamped, WheelsCmdStamped
 
 # throttle and direction for each wheel
-THROTTLE_LEFT = 0.64        # 50% throttle
+THROTTLE_LEFT = 0.23        # 50% throttle
 DIRECTION_LEFT = 1         # forward
-THROTTLE_RIGHT = 0.7       # 30% throttle
+THROTTLE_RIGHT = 0.3       # 30% throttle
 DIRECTION_RIGHT = 1       # backward
 
 class WheelEncoderReaderNode(DTROS):
@@ -76,7 +76,7 @@ class WheelEncoderReaderNode(DTROS):
                 # cur_pos = 2 * 3.14159 * self._radius * (self._ticks_left - self._starting_ticks_left)
                 # message = WheelsCmdStamped(vel_left=self._vel_left, vel_right=self._vel_right)
 
-                if reached is False and cur_pos / 135 < 0.055:
+                if reached is False and cur_pos / 135 < 0.04:
                     message = WheelsCmdStamped(vel_left= self._vel_left, vel_right=-self._vel_right)
                     cur_pos = 2 * 3.14159 * self._radius * (self._ticks_left - self._starting_ticks_left)
                     self._publisher.publish(message)
@@ -99,7 +99,7 @@ class WheelEncoderReaderNode(DTROS):
                 if reached and not backed:
                     print('cur_pos ', cur_pos)
                     message = WheelsCmdStamped(vel_left=-self._vel_left, vel_right=self._vel_right)
-                    if cur_pos / 135 >= 0:
+                    if cur_pos / 135 >= 0.005:
                         cur_pos = 2 * 3.14159 * self._radius * (self._ticks_left - self._starting_ticks_left)
                         self._publisher.publish(message)
                         rate.sleep()

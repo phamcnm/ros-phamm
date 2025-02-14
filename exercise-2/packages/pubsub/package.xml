@@ -1,5 +1,5 @@
 <package>
-  <name>subsub</name>
+  <name>pubsub</name>
   <version>0.1.0</version>
   <description>
   This package contains the code for doing odometry with wheel encoders.

@@ -16,12 +16,12 @@ Undistort the image seen from the camera
 
 `dts devel run -H ROBOT_NAME -L cv_undistort` 
 
-#### [camera](https://github.com/phamcnm/ros-phamm/blob/main/exercise-3/packages/computer_vision/src/lane_based_behavior_controller_template.py)
+#### [lane_based_behavior](https://github.com/phamcnm/ros-phamm/blob/main/exercise-3/packages/computer_vision/src/lane_based_behavior_controller_template.py)
 Perform requested vision-wheel behaviors
 
 `dts devel run -H ROBOT_NAME -L detect`
 
-#### [drive_back_and_forth](https://github.com/phamcnm/ros-phamm/blob/main/exercise-3/packages/computer_vision/src/lane_detection_template.py)
+#### [lane_following](https://github.com/phamcnm/ros-phamm/blob/main/exercise-3/packages/computer_vision/src/lane_detection_template.py)
 Perform lane following. This program fulfills the requirements of both part 2 and 3.
 
 `dts devel run -H ROBOT_NAME -L lane`

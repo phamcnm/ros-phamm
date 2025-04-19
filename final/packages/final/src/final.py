@@ -589,6 +589,42 @@ class LaneFollowNode(DTROS):
             elif self.stage2_phases[self.phase] == 'left':
                 self.logwarn("performing left_turn")
                 self.move(duration_sec=2.6, direction='left')
+
+        elif self.stage == 3:
+            cut_image = img[:, int(0.5 * self.w):]
+            gray_image = cv2.cvtColor(cut_image, cv2.COLOR_BGR2GRAY)
+
+
+            if not self.seen_tag:
+                tags = self.at_detector.detect(gray_image, estimate_tag_pose=False, camera_params=None, tag_size=None)
+                if len(tags) > 0:
+                    self.react_to_detection(tags[0].tag_id)
+                    self.last_tag_id = tags[0].tag_id
+                    self.seen_tag = True
+                    print(f"saw tag {tags[0].tag_id}")
+
+            print(f"self.phase {self.phase}")
+
+            if self.stage2_phases[self.phase] == 'default':
+                # Dynamically adjust look-ahead distance
+                if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
+                    crop = img[350:-1, :, :]  # Look closer in turns
+                else:
+                    crop = img[300:-1, :, :]  # Standard distance
+                    
+                # Process image to find yellow lane
+                proportional, multiple_points, red_detected, blue_detected = self._process_image(crop)
+
+                with self.lock:
+                    self.proportional = proportional
+                    self.multiple_points = multiple_points
+                    self.obj_stop = red_detected
+            elif self.stage2_phases[self.phase] == 'right':
+                self.logwarn("performing right_turn")
+                self.move(duration_sec=2.2, direction='right')
+            elif self.stage2_phases[self.phase] == 'left':
+                self.logwarn("performing left_turn")
+                self.move(duration_sec=2.6, direction='left')
             
         # Publish debug image if needed
         if DEBUG:
@@ -631,6 +667,9 @@ class LaneFollowNode(DTROS):
         if self.stage == 1 and self.max_phase == 3:
             self.next_stage()
 
+        if self.stage == 2 and self.max_phase == 2:
+            self.next_stage()
+
         return True  # signal that turn is complete
 
     def next_phase(self):
@@ -638,7 +677,7 @@ class LaneFollowNode(DTROS):
         self.phase = self.max_phase
 
     def next_stage(self):
-        print("entered stage 2")
+        print("entered new stage {self.stage}")
         self.stage += 1
         self.phase = 0
         self.max_phase = 0

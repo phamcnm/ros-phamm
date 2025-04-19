@@ -126,6 +126,18 @@ class LaneFollowNode(DTROS):
         rgba_val = ColorRGBA(r=colors[0], g=colors[1], b=colors[2], a=1)
         self._publisher_led.publish(LEDPattern(rgb_vals=[rgba_val,rgba_val,rgba_val,rgba_val,rgba_val]))
 
+    def detect_peDuckstrians(self, hsvFrame):
+        self.orange_lower = np.array([10, 120, 120], np.uint8)
+        self.orange_upper = np.array([20, 255, 255], np.uint8)
+
+        orange_mask = cv2.inRange(hsvFrame, self.orange_lower, self.orange_upper)
+        
+        contours, hierarchy = cv2.findContours(orange_mask, 
+                                            cv2.RETR_TREE, 
+                                            cv2.CHAIN_APPROX_SIMPLE)
+
+        return len(contours) > 0
+
     def _setup_publishers_subscribers(self):
         """Set up all publishers and subscribers"""
         # Publishers
@@ -201,6 +213,13 @@ class LaneFollowNode(DTROS):
         self.tof_distance = 1.0
         self.obj_stop = False
         self.lock = threading.Lock()
+        self.duckie_stop = False
+
+        #part 3
+        self.seen_line = 0
+        self.blueline_start_time = None
+        self.blueline_stop = False
+        self.disable_drive = False
 
     def _init_logic_params(self):
         self.phase = 0
@@ -214,6 +233,9 @@ class LaneFollowNode(DTROS):
         self.stage2_phases = ['default', 'right', 'left']
         self.seen_tag = False
         self.driving = True
+
+        #stage 3 stuff
+        self.stage3_phases = ['default', 'navigate', 'end']
 
     def cb_tof(self, msg):
         """Process Time-of-Flight sensor data"""
@@ -230,21 +252,22 @@ class LaneFollowNode(DTROS):
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
 
-        if time.time() > self.red_cooldown_until:
-            red_mask = cv2.inRange(hsv, RED_MASK[0], RED_MASK[1])
-            red_contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                
-            for i, contour in enumerate(red_contours):
-                for point in contour:
-                    x, y = point[0]
-                    if y >= 0.7 * crop_height:
-                        print("red detected") 
-                        return None, [], True, False
+        if self.stage == 1 or self.stage == 2 or self.stage == 3:
+            if time.time() > self.red_cooldown_until:
+                red_mask = cv2.inRange(hsv, RED_MASK[0], RED_MASK[1])
+                red_contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    
+                for i, contour in enumerate(red_contours):
+                    for point in contour:
+                        x, y = point[0]
+                        if y >= 0.7 * crop_height:
+                            print("red detected") 
+                            return None, [], True, False
                     
         # now = rospy.Time.now()
         # if self.phase == 0 and now - self.last_stamp > self.publish_duration:
             # self.last_stamp = now
-        if self.phase == 0:
+        if self.stage == 1 and self.phase == 0:
             # hsv_full = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             # blue_mask = cv2.inRange(crop, BLUE_MASK[0], BLUE_MASK[1])
             # blue_count = cv2.countNonZero(blue_mask)
@@ -274,6 +297,30 @@ class LaneFollowNode(DTROS):
                 # else:
                 #     self.grid_controller.update(None, None)
    
+        if self.stage == 3:
+            self.blue_lower = np.array([100, 150, 50], np.uint8)  
+            self.blue_upper = np.array([115, 255, 255], np.uint8)
+
+            blueline_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+
+            blueline_contours, _ = cv2.findContours(blueline_mask, 
+                                            cv2.RETR_TREE, 
+                                            cv2.CHAIN_APPROX_SIMPLE)
+            if self.seen_line == 2:
+                if len(blueline_contours) == 0:
+                    self.seen_line = 0
+                else:
+                    return
+
+            for point in blueline_contours:
+                x, y = point[0][0]
+                if y >= 0.45 * self.h:
+                    print("GOT IN BLUE LINE")
+                    self.seen_line = 1
+                    self.blueline_start_time = time.time()
+                    self.blueline_stop = True
+                    break
+
                 
         max_area = 20
         max_idx = -1
@@ -459,50 +506,55 @@ class LaneFollowNode(DTROS):
 
     def drive(self):
         '''Lane following'''
-        with self.lock:
-            proportional = self.proportional
-            multiple_points = list(self.multiple_points)  # make a copy to avoid shared access
-            obj_stop = self.obj_stop
-            if obj_stop:
-                self.obj_stop = False  # immediately clear the stop flag
-            duckie_stop = self.duckie_stop
-            if duckie_stop:
-                self.duckie_stop = False
-
-        if obj_stop:
-            self.stop(8)
-            self.red_cooldown_until = time.time() + 10
-            rospy.sleep(1.0)
-            self.next_phase()
-            return
-        elif duckie_stop:
-            self.stop(8)
-            rospy.sleep(1.0)
-            # rospy.sleep(0.5)
-            return
-
-
-        if proportional is None:
-            omega, velocity = self._handle_no_contour()
+        if self.disable_drive:
+            self.twist.omega = 0
+            self.twist.v = 0
+            self.vel_pub.publish(self.twist)
         else:
-            self.no_contour_count = 0
-            pid_output, P, D, I = self._calculate_pid(proportional)
+            with self.lock:
+                proportional = self.proportional
+                multiple_points = list(self.multiple_points)  # make a copy to avoid shared access
+                obj_stop = self.obj_stop
+                if obj_stop:
+                    self.obj_stop = False  # immediately clear the stop flag
+                duckie_stop = self.duckie_stop
+                if duckie_stop:
+                    self.duckie_stop = False
 
-            # Swap self.multiple_points for local copy
-            self.multiple_points = multiple_points  # optional if downstream needs it
-            omega, velocity, angle_adjustment = self._calculate_steering(pid_output, proportional)
+            if obj_stop:
+                self.stop(8)
+                self.red_cooldown_until = time.time() + 10
+                rospy.sleep(1.0)
+                self.next_phase()
+                return
+            elif duckie_stop:
+                self.stop(8)
+                rospy.sleep(1.0)
+                # rospy.sleep(0.5)
+                return
 
-            self.last_valid_omega = omega
-            self.last_valid_velocity = velocity
 
-            if DEBUG:
-                turn_dir = "RIGHT" if proportional > 0 else "LEFT" if proportional < 0 else "STRAIGHT"
-                debug_info = f"Turn: {turn_dir}, P:{P:.2f} D:{D:.2f} I:{I:.2f} Angle:{angle_adjustment:.2f} Omega:{omega:.2f} Speed:{velocity:.2f} Error:{proportional:.1f}"
-                self.loginfo(debug_info)
+            if proportional is None:
+                omega, velocity = self._handle_no_contour()
+            else:
+                self.no_contour_count = 0
+                pid_output, P, D, I = self._calculate_pid(proportional)
 
-        self.twist.omega = omega
-        self.twist.v = velocity
-        self.vel_pub.publish(self.twist)
+                # Swap self.multiple_points for local copy
+                self.multiple_points = multiple_points  # optional if downstream needs it
+                omega, velocity, angle_adjustment = self._calculate_steering(pid_output, proportional)
+
+                self.last_valid_omega = omega
+                self.last_valid_velocity = velocity
+
+                if DEBUG:
+                    turn_dir = "RIGHT" if proportional > 0 else "LEFT" if proportional < 0 else "STRAIGHT"
+                    debug_info = f"Turn: {turn_dir}, P:{P:.2f} D:{D:.2f} I:{I:.2f} Angle:{angle_adjustment:.2f} Omega:{omega:.2f} Speed:{velocity:.2f} Error:{proportional:.1f}"
+                    self.loginfo(debug_info)
+
+            self.twist.omega = omega
+            self.twist.v = velocity
+            self.vel_pub.publish(self.twist)
         
     def stop(self, duration):
         """Stop the robot for a specified duration"""
@@ -594,37 +646,45 @@ class LaneFollowNode(DTROS):
             cut_image = img[:, int(0.5 * self.w):]
             gray_image = cv2.cvtColor(cut_image, cv2.COLOR_BGR2GRAY)
 
-
-            if not self.seen_tag:
-                tags = self.at_detector.detect(gray_image, estimate_tag_pose=False, camera_params=None, tag_size=None)
-                if len(tags) > 0:
-                    self.react_to_detection(tags[0].tag_id)
-                    self.last_tag_id = tags[0].tag_id
-                    self.seen_tag = True
-                    print(f"saw tag {tags[0].tag_id}")
-
-            print(f"self.phase {self.phase}")
-
-            if self.stage2_phases[self.phase] == 'default':
-                # Dynamically adjust look-ahead distance
-                if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
-                    crop = img[350:-1, :, :]  # Look closer in turns
+            if self.stage3_phases[self.phase] == 'default':
+                if self.blueline_stop:
+                    #saw blue line
+                    print('STOPPING RIGHT NOW')
+                    if self.seen_line == 1:
+                        if time.time() - self.blueline_start_time < 1:
+                            self.disable_drive = True
+                        else:
+                            self.seen_line = 2
+                            self.disable_drive = False
+                    if self.seen_line == 2:
+                        hsvFrame = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                        if self.detect_peDuckstrians(hsvFrame):
+                            print("SAW YELLOW DUCKS")
+                            self.disable_drive = True
+                        else:
+                            self.blueline_stop = False
+                            self.disable_drive = False
                 else:
-                    crop = img[300:-1, :, :]  # Standard distance
-                    
-                # Process image to find yellow lane
-                proportional, multiple_points, red_detected, blue_detected = self._process_image(crop)
+                    #lane follow
+                    # Dynamically adjust look-ahead distance
+                    if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
+                        crop = img[350:-1, :, :]  # Look closer in turns
+                    else:
+                        crop = img[300:-1, :, :]  # Standard distance
+                        
+                    # Process image to find yellow lane
+                    proportional, multiple_points, blueline_detected, _ = self._process_image(crop)
 
-                with self.lock:
-                    self.proportional = proportional
-                    self.multiple_points = multiple_points
-                    self.obj_stop = red_detected
-            elif self.stage2_phases[self.phase] == 'right':
-                self.logwarn("performing right_turn")
-                self.move(duration_sec=2.2, direction='right')
-            elif self.stage2_phases[self.phase] == 'left':
+                    with self.lock:
+                        self.proportional = proportional
+                        self.multiple_points = multiple_points
+                        self.obj_stop = blueline_detected
+            elif self.stage3_phases[self.phase] == 'navigate':
                 self.logwarn("performing left_turn")
                 self.move(duration_sec=2.6, direction='left')
+
+            elif self.stage3_phases[self.phase] == 'end':
+                return
             
         # Publish debug image if needed
         if DEBUG:
@@ -677,7 +737,7 @@ class LaneFollowNode(DTROS):
         self.phase = self.max_phase
 
     def next_stage(self):
-        print("entered new stage {self.stage}")
+        print(f"entered new stage {self.stage}")
         self.stage += 1
         self.phase = 0
         self.max_phase = 0

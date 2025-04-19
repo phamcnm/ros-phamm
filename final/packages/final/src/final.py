@@ -118,7 +118,22 @@ class LaneFollowNode(DTROS):
         process_frequency = 5
         self.publish_duration = rospy.Duration.from_sec(1.0 / process_frequency)
         params = cv2.SimpleBlobDetector_Params()
-        params.minArea = 10
+
+        # Allow small blobs, even noisy ones
+        params.filterByArea = True
+        params.minArea = 10   # very small blobs, more sensitive
+        params.maxArea = 8000  # generous upper bound in case of partial lighting
+
+        # Allow slightly misshapen blobs
+        params.filterByCircularity = False
+        params.filterByInertia = False
+        params.filterByConvexity = False
+
+        # Detect black blobs (important!)
+        params.filterByColor = True
+        params.blobColor = 0  # black
+
+        # Allow close blobs to be treated individually
         params.minDistBetweenBlobs = 2
         self.simple_blob_detector = cv2.SimpleBlobDetector_create(params)
 
@@ -200,6 +215,7 @@ class LaneFollowNode(DTROS):
         self.multiple_points = []
         self.tof_distance = 1.0
         self.obj_stop = False
+        self.duckie_stop = False
         self.lock = threading.Lock()
 
     def _init_logic_params(self):
@@ -241,38 +257,42 @@ class LaneFollowNode(DTROS):
                         print("red detected") 
                         return None, [], True, False
                     
-        # now = rospy.Time.now()
-        # if self.phase == 0 and now - self.last_stamp > self.publish_duration:
-            # self.last_stamp = now
-        if self.phase == 0:
+        now = rospy.Time.now()
+        if self.phase == 0 and now - self.last_stamp > self.publish_duration:
+            self.last_stamp = now
             # hsv_full = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             # blue_mask = cv2.inRange(crop, BLUE_MASK[0], BLUE_MASK[1])
             # blue_count = cv2.countNonZero(blue_mask)
             # print(blue_count)
-            blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
-            blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 40]
-            num_large_blue = len(large_blue_contours)
+            # blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
+            # blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            # large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 40]
+            # num_large_blue = len(large_blue_contours)
             
-            if num_large_blue > 0:
-                # self.phase = 0
-                print('seen blue', num_large_blue)
+            # if num_large_blue > 0:
+            #     # self.phase = 0
+            #     print('seen blue', num_large_blue)
+            #     return None, [], False, True
+
+            # DETECT CIRCULAR GRID
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            equalized = clahe.apply(gray)
+            _, thresh = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            (detection, centers) = cv2.findCirclesGrid(thresh, patternSize=(7, 3), 
+                flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=self.simple_blob_detector)
+            if detection or (centers is not None and len(centers) >= 3):
                 return None, [], False, True
+            # if centers is not None and len(centers) == 21:
+            #     centers = centers.reshape((3, 7, 2))
+            #     middle_point = centers[1][4]
 
-                # # DETECT CIRCULAR GRID
-                # (detection, centers) = cv2.findCirclesGrid(img, patternSize=(7, 3), 
-                #     flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=self.simple_blob_detector)
-                # if centers is not None and len(centers) == 21:
-                #     centers = centers.reshape((3, 7, 2))
-                #     middle_point = centers[1][4]
-
-                #     left = centers[1, 0]
-                #     right = centers[1, -1]
-                #     horizontal_span = np.linalg.norm(right - left)
-                #     self.grid_controller.update(horizontal_span, middle_point[0])
-
-                # else:
-                #     self.grid_controller.update(None, None)
+            #     left = centers[1, 0]
+            #     right = centers[1, -1]
+            #     horizontal_span = np.linalg.norm(right - left)
+            #     self.grid_controller.update(horizontal_span, middle_point[0])
+            # else:
+            #     self.grid_controller.update(None, None)
    
                 
         max_area = 20
@@ -465,9 +485,6 @@ class LaneFollowNode(DTROS):
             obj_stop = self.obj_stop
             if obj_stop:
                 self.obj_stop = False  # immediately clear the stop flag
-            duckie_stop = self.duckie_stop
-            if duckie_stop:
-                self.duckie_stop = False
 
         if obj_stop:
             self.stop(8)
@@ -475,9 +492,12 @@ class LaneFollowNode(DTROS):
             rospy.sleep(1.0)
             self.next_phase()
             return
-        elif duckie_stop:
-            self.stop(8)
-            rospy.sleep(1.0)
+        elif self.duckie_stop:
+            self.twist.omega = 0
+            self.twist.v = 0
+            self.vel_pub.publish(self.twist)
+            # self.stop(8)
+            # rospy.sleep(1.0)
             # rospy.sleep(0.5)
             return
 
@@ -535,13 +555,12 @@ class LaneFollowNode(DTROS):
                     crop = img[300:-1, :, :]  # Standard distance
                     
                 # Process image to find yellow lane
-                proportional, multiple_points, red_detected, blue_detected = self._process_image(crop)
+                proportional, multiple_points, red_detected, self.duckie_stop = self._process_image(crop)
 
                 with self.lock:
                     self.proportional = proportional
                     self.multiple_points = multiple_points
                     self.obj_stop = red_detected
-                    self.duckie_stop = blue_detected
             elif self.stage1_phases[self.phase] == 'right_turn':
                 self.logwarn("performing right_turn")
                 self.move(duration_sec=2.2, direction='right')
@@ -577,7 +596,7 @@ class LaneFollowNode(DTROS):
                     crop = img[300:-1, :, :]  # Standard distance
                     
                 # Process image to find yellow lane
-                proportional, multiple_points, red_detected, blue_detected = self._process_image(crop)
+                proportional, multiple_points, red_detected, self.duckie_stop = self._process_image(crop)
 
                 with self.lock:
                     self.proportional = proportional

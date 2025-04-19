@@ -13,6 +13,7 @@ from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped, LEDPattern
 import threading, time
 from dt_apriltags import Detector
 from collections import deque
+from geometry_msgs.msg import Point32
 
 
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
@@ -121,6 +122,7 @@ class LaneFollowNode(DTROS):
         params.minArea = 10
         params.minDistBetweenBlobs = 2
         self.simple_blob_detector = cv2.SimpleBlobDetector_create(params)
+        self.circlepattern_dims = [7, 3]
 
     def publish_leds(self, colors):
         rgba_val = ColorRGBA(r=colors[0], g=colors[1], b=colors[2], a=1)
@@ -220,6 +222,10 @@ class LaneFollowNode(DTROS):
         self.blueline_start_time = None
         self.blueline_stop = False
         self.disable_drive = False
+        self.bot_detected = False
+        self.manuvering = False
+        self.manuver_state = 0
+        self.state_time = 0
 
     def _init_logic_params(self):
         self.phase = 0
@@ -235,7 +241,7 @@ class LaneFollowNode(DTROS):
         self.driving = True
 
         #stage 3 stuff
-        self.stage3_phases = ['default', 'navigate', 'end']
+        self.stage3_phases = ['default', 'end']
 
     def cb_tof(self, msg):
         """Process Time-of-Flight sensor data"""
@@ -298,28 +304,33 @@ class LaneFollowNode(DTROS):
                 #     self.grid_controller.update(None, None)
    
         if self.stage == 3:
-            self.blue_lower = np.array([100, 150, 50], np.uint8)  
-            self.blue_upper = np.array([115, 255, 255], np.uint8)
+            bot_detected = self.detect_bot(crop)
+            if bot_detected:
+                self.manuvering = True
 
-            blueline_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+            if not bot_detected and not self.manuvering:
+                self.blue_lower = np.array([100, 150, 50], np.uint8)  
+                self.blue_upper = np.array([115, 255, 255], np.uint8)
 
-            blueline_contours, _ = cv2.findContours(blueline_mask, 
-                                            cv2.RETR_TREE, 
-                                            cv2.CHAIN_APPROX_SIMPLE)
-            if self.seen_line == 2:
-                if len(blueline_contours) == 0:
-                    self.seen_line = 0
-                else:
-                    return
+                blueline_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
 
-            for point in blueline_contours:
-                x, y = point[0][0]
-                if y >= 0.45 * self.h:
-                    print("GOT IN BLUE LINE")
-                    self.seen_line = 1
-                    self.blueline_start_time = time.time()
-                    self.blueline_stop = True
-                    break
+                blueline_contours, _ = cv2.findContours(blueline_mask, 
+                                                cv2.RETR_TREE, 
+                                                cv2.CHAIN_APPROX_SIMPLE)
+                if self.seen_line == 2:
+                    if len(blueline_contours) == 0:
+                        self.seen_line = 0
+                    else:
+                        return None, [], False, False
+
+                for point in blueline_contours:
+                    x, y = point[0][0]
+                    if y >= 0.45 * self.h:
+                        print("GOT IN BLUE LINE")
+                        self.seen_line = 1
+                        self.blueline_start_time = time.time()
+                        self.blueline_stop = True
+                        break
 
                 
         max_area = 20
@@ -507,9 +518,14 @@ class LaneFollowNode(DTROS):
     def drive(self):
         '''Lane following'''
         if self.disable_drive:
-            self.twist.omega = 0
-            self.twist.v = 0
-            self.vel_pub.publish(self.twist)
+            if not self.bot_detected and not self.manuvering:
+                #stop at crosswalk
+                self.twist.omega = 0
+                self.twist.v = 0
+                self.vel_pub.publish(self.twist)
+            else:
+                self.twist.v, self.twist.omega = self.manuver_around_bot()
+                self.vel_pub.publish(self.twist)
         else:
             with self.lock:
                 proportional = self.proportional
@@ -647,6 +663,15 @@ class LaneFollowNode(DTROS):
             gray_image = cv2.cvtColor(cut_image, cv2.COLOR_BGR2GRAY)
 
             if self.stage3_phases[self.phase] == 'default':
+                # Dynamically adjust look-ahead distance
+                if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
+                    crop = img[350:-1, :, :]  # Look closer in turns
+                else:
+                    crop = img[300:-1, :, :]  # Standard distance
+                    
+                # Process image to find yellow lane
+                proportional, multiple_points, blueline_detected, _ = self._process_image(img)
+
                 if self.blueline_stop:
                     #saw blue line
                     print('STOPPING RIGHT NOW')
@@ -666,22 +691,11 @@ class LaneFollowNode(DTROS):
                             self.disable_drive = False
                 else:
                     #lane follow
-                    # Dynamically adjust look-ahead distance
-                    if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
-                        crop = img[350:-1, :, :]  # Look closer in turns
-                    else:
-                        crop = img[300:-1, :, :]  # Standard distance
-                        
-                    # Process image to find yellow lane
-                    proportional, multiple_points, blueline_detected, _ = self._process_image(crop)
 
                     with self.lock:
                         self.proportional = proportional
                         self.multiple_points = multiple_points
                         self.obj_stop = blueline_detected
-            elif self.stage3_phases[self.phase] == 'navigate':
-                self.logwarn("performing left_turn")
-                self.move(duration_sec=2.6, direction='left')
 
             elif self.stage3_phases[self.phase] == 'end':
                 return
@@ -756,6 +770,120 @@ class LaneFollowNode(DTROS):
         height = max_y - min_y
         
         return width, height
+
+    def detect_bot(self, image_cv):
+        """
+        Callback for processing a image which potentially contains a back pattern. Processes the image only if
+        sufficient time has passed since processing the previous image (relative to the chosen processing frequency).
+
+        The pattern detection is performed using OpenCV's `findCirclesGrid <https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html?highlight=solvepnp#findcirclesgrid>`_ function.
+
+        Args:
+            image_msg (:obj:`sensor_msgs.msg.CompressedImage`): Input image
+
+        """
+        now = rospy.Time.now()
+        if now - self.last_stamp < self.publish_duration:
+            return
+        else:
+            self.last_stamp = now
+
+        (detection, centers) = cv2.findCirclesGrid(
+            image_cv,
+            patternSize=tuple(self.circlepattern_dims),
+            flags=cv2.CALIB_CB_SYMMETRIC_GRID,
+            blobDetector=self.simple_blob_detector,
+        )
+
+        # if the detection is successful add the information about it,
+        # otherwise publish a message saying that it was unsuccessful
+        if detection > 0:
+            points_list = []
+            for point in centers:
+                center = Point32()
+                center.x = point[0, 0]
+                center.y = point[0, 1]
+                center.z = 0
+                points_list.append(center)
+        
+        if detection > 0:
+            return np.max(centers) - np.min(centers) > 250
+        return False
+
+    def manuver_around_bot(self):
+        print("MANUEVERING...")
+        self.state_time += 1
+        turn_angle = 10
+        turn_time = 12
+        straight_time = 50
+        if self.state_time < 5:
+            return 0, 0
+
+        # wait for 1 second
+        if self.manuver_state == 0:
+            if self.state_time > 25:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0
+            twist = 0
+        # turn to face other lane
+        elif self.manuver_state == 1:
+            if self.state_time > turn_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = -0.25
+            twist = turn_angle
+        # drive into other lane 
+        elif self.manuver_state == 2:
+            if self.state_time > straight_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = 0
+        # turn to drive past other bot
+        elif self.manuver_state == 3:
+            if self.state_time > turn_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = -turn_angle
+        # drive past other bot
+        elif self.manuver_state == 4:
+            if self.state_time > straight_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = 0
+        # turn back to face proper lane
+        elif self.manuver_state == 5:
+            if self.state_time > turn_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = -turn_angle
+        # drive into proper lane
+        elif self.manuver_state == 6:
+            if self.state_time > straight_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = 0
+        # turn to face proper direction
+        elif self.manuver_state == 7:
+            if self.state_time > turn_time:
+                self.manuver_state += 1
+                self.state_time = 0
+            vel = 0.25
+            twist = turn_angle
+        # end manuver
+        else:
+            self.manuvering = False
+            self.state_time = 0
+            self.manuver_state = 0
+            vel = 0.2
+            twist = 0
+        
+        return vel, twist
 
 
 if __name__ == "__main__":

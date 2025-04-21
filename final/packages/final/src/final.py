@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import rospy
+import sys
+import argparse
 import os
 import math
 import numpy as np
@@ -74,10 +76,12 @@ class Controller:
         return "right" if last - first > 0 else "left"
     
 class LaneFollowNode(DTROS):
-    def __init__(self, node_name):
+    def __init__(self, node_name, zone=1):
         super(LaneFollowNode, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
         self.node_name = node_name
         self.veh = os.environ['VEHICLE_NAME']
+
+        self._init_logic_params(zone)
         
         # Initialize TurboJPEG for image decoding
         self.jpeg = TurboJPEG()
@@ -87,8 +91,6 @@ class LaneFollowNode(DTROS):
         
         # Initialize control parameters
         self._init_control_params()
-
-        self._init_logic_params()
 
         self.last_stamp = rospy.Time.now()
 
@@ -109,6 +111,7 @@ class LaneFollowNode(DTROS):
         
         # Wait before sending motor commands
         rospy.Rate(0.20).sleep()
+        self.publish_leds([0,0,0])
         
         # Shutdown hook
         rospy.on_shutdown(self.hook)
@@ -140,18 +143,24 @@ class LaneFollowNode(DTROS):
         self.circlepattern_dims = [7, 3]
 
     def publish_leds(self, colors):
+        empty = ColorRGBA(r=0, g=0, b=0, a=1)
         rgba_val = ColorRGBA(r=colors[0], g=colors[1], b=colors[2], a=1)
-        self._publisher_led.publish(LEDPattern(rgb_vals=[rgba_val,rgba_val,rgba_val,rgba_val,rgba_val]))
+        self._publisher_led.publish(LEDPattern(rgb_vals=[empty,rgba_val,rgba_val,rgba_val,empty]))
 
-    def detect_peDuckstrians(self, hsvFrame):
-        self.orange_lower = np.array([10, 120, 120], np.uint8)
-        self.orange_upper = np.array([20, 255, 255], np.uint8)
+    def detect_peDuckstrians(self, img):
+        crop = img[250:-1, 250:-1, :]
+        hsvFrame = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        self.orange_lower = np.array([9, 91, 163], np.uint8)
+        self.orange_upper = np.array([22, 255, 255], np.uint8)
 
         orange_mask = cv2.inRange(hsvFrame, self.orange_lower, self.orange_upper)
         
-        contours, hierarchy = cv2.findContours(orange_mask, 
-                                            cv2.RETR_TREE, 
-                                            cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(orange_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 500]
+
+        for c in contours:
+            print(f"cv2.contourArea(cnt) {cv2.contourArea(c)}")
 
         return len(contours) > 0
 
@@ -169,6 +178,8 @@ class LaneFollowNode(DTROS):
         self.sub = rospy.Subscriber(f"/{self.veh}/camera_node/image/compressed",
                                    CompressedImage, self.callback, 
                                    queue_size=1, buff_size="20MB")
+        
+        self._publisher_led = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=1)
         
         # Conditional subscribers
         if SAFETY:
@@ -189,7 +200,7 @@ class LaneFollowNode(DTROS):
         elif AUSSIE:
             self.offset = 0
         else:
-            self.offset = 220
+            self.offset = 230
             
         # Velocity control
         self.base_velocity = 0.2
@@ -238,14 +249,28 @@ class LaneFollowNode(DTROS):
         self.blueline_start_time = None
         self.blueline_stop = False
         self.disable_drive = False
-        self.bot_detected = False
+        self.last_disable_drive = False
         self.manuvering = False
         self.manuver_state = 0
         self.state_time = 0
+        self.blue_count = 0
+        self.see_blue_timer = time.time()
+        self.tailing_timer = time.time()
+        self.seen_blue = False
+        self.see_peduckstrian_timer = time.time()
+        self.seen_peduckstrian = False
 
-    def _init_logic_params(self):
+        #part 4
+        self.park_timer = time.time()
+        self.tag_timer = time.time()
+        self.reset_timer = time.time()
+        self.zone_count = 0
+
+    def _init_logic_params(self, zone):
         self.phase = 0
         self.red_cooldown_until = 0
+        # self.tailing_cooldown = 0
+        self.current_leds = [0,0,0]
         self.max_phase = 0
         self.stage1_phases = ['tailing', 'right_turn', 'straight', 'left_turn']
 
@@ -258,6 +283,12 @@ class LaneFollowNode(DTROS):
 
         #stage 3 stuff
         self.stage3_phases = ['default', 'end']
+        self.blue_timer = time.time()
+
+        #stage 4
+        self.parking = False
+        self.zone = zone
+        self.stage4_phases = ['park', 'follow']
 
     def cb_tof(self, msg):
         """Process Time-of-Flight sensor data"""
@@ -265,7 +296,7 @@ class LaneFollowNode(DTROS):
         if 0.05 < self.tof_distance <= 0.3:
             self.obj_stop = True
 
-    def _process_image(self, crop):
+    def _process_image(self, crop, img=None):
         """Process image to find lane and calculate proportional error"""
         crop_width = crop.shape[1]
         crop_height = crop.shape[0]
@@ -274,83 +305,134 @@ class LaneFollowNode(DTROS):
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
 
-        if self.stage == 1 or self.stage == 2 or self.stage == 3:
+        if self.stage != 4:
             if time.time() > self.red_cooldown_until:
                 red_mask = cv2.inRange(hsv, RED_MASK[0], RED_MASK[1])
                 red_contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
                     
                 for i, contour in enumerate(red_contours):
+                    if cv2.contourArea(contour) < 100:
+                        continue
                     for point in contour:
                         x, y = point[0]
                         if y >= 0.7 * crop_height:
                             print("red detected") 
-                            return None, [], True, False
+                            return None, [], True, False, None
                     
         now = rospy.Time.now()
-        if self.stage == 1 and self.phase == 0 and now - self.last_stamp > self.publish_duration:
+        if (self.stage == 1 or self.stage == 2) and self.phase == 0 and now - self.last_stamp > self.publish_duration:
             self.last_stamp = now
-            # hsv_full = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            # blue_mask = cv2.inRange(crop, BLUE_MASK[0], BLUE_MASK[1])
-            # blue_count = cv2.countNonZero(blue_mask)
-            # print(blue_count)
-            # blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
-            # blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            # large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 40]
-            # num_large_blue = len(large_blue_contours)
+
+            # # detect the first turn
+            # if self.phase == 0 and self.max_phase == 0 and img is not None:
+            #     hsv_full = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            #     blue_mask = cv2.inRange(hsv_full, BLUE_MASK[0], BLUE_MASK[1])
+            #     blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            #     large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 200]
+            #     num_large_blue = len(large_blue_contours)
+                
+            #     if num_large_blue > 0:
+            #         print(cv2.contourArea(large_blue_contours[0]))
+            #         # self.phase = 0
+            #         print('seen blue', num_large_blue)
+            #         self.disable_drive = True
+            #         self.tailing_timer = time.time()
+            #         if self.current_leds != [1, 0, 0]:
+            #             self.publish_leds([1, 0, 0])
+            #             self.current_leds = [1, 0, 0]
+            #         # self.tailing_cooldown = now.to_sec()
+            #         # self.publish_leds([1, 0, 0])
+            #         return None, [], False, True, blue_mask
+            #     else:
+            #         if self.current_leds != [0, 0, 0] and time.time() - self.tailing_timer > 10:
+            #             self.publish_leds([0, 0, 0])
+            #             self.current_leds = [0, 0, 0]
+            #         # if now.to_sec() - self.tailing_cooldown > 5:
+            #         #     self.publish_leds([0, 0, 0])
+            #         self.disable_drive = False
+
+            blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
+            blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 200]
+            num_large_blue = len(large_blue_contours)
             
-            # if num_large_blue > 0:
-            #     # self.phase = 0
-            #     print('seen blue', num_large_blue)
-            #     return None, [], False, True
+            if num_large_blue > 0:
+                print(cv2.contourArea(large_blue_contours[0]))
+                print('seen blue', num_large_blue)
+                self.disable_drive = True
+                self.tailing_timer = time.time()
+                if self.current_leds != [1, 0, 0]:
+                    self.publish_leds([1, 0, 0])
+                    self.current_leds = [1, 0, 0]
+                return None, [], False, True, blue_mask
+            else:
+                if self.current_leds != [0, 0, 0] and time.time() - self.tailing_timer > 15:
+                    self.publish_leds([0, 0, 0])
+                    self.current_leds = [0, 0, 0]
+                self.disable_drive = False
 
-            # DETECT CIRCULAR GRID
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            equalized = clahe.apply(gray)
-            _, thresh = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            (detection, centers) = cv2.findCirclesGrid(thresh, patternSize=(7, 3), 
-                flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=self.simple_blob_detector)
-            if detection or (centers is not None and len(centers) >= 3):
-                return None, [], False, True
-            # if centers is not None and len(centers) == 21:
-            #     centers = centers.reshape((3, 7, 2))
-            #     middle_point = centers[1][4]
-
-            #     left = centers[1, 0]
-            #     right = centers[1, -1]
-            #     horizontal_span = np.linalg.norm(right - left)
-            #     self.grid_controller.update(horizontal_span, middle_point[0])
-            # else:
-            #     self.grid_controller.update(None, None)
-   
         if self.stage == 3:
-            bot_detected = self.detect_bot(crop)
-            if bot_detected:
-                self.manuvering = True
+            if now - self.last_stamp > self.publish_duration:
+                self.last_stamp = now
+            
+            if self.blue_count == 1 or self.blue_count == 4: # seen blue line, but waiting for pedestrian
+                print("blue detected at blue count, waiting!!!!,", self.blue_count)
+                return None, [], False, True, None
+            elif time.time() - self.blue_timer > 5:
+                if self.blue_count == 0 or self.blue_count == 3: 
+                    blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
+                    blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                        
+                    for i, contour in enumerate(blue_contours):
+                        if cv2.contourArea(contour) < 250:
+                            continue
+                        for point in contour:
+                            x, y = point[0]
+                            if y >= 0.7 * crop_height:
+                                print("blue detected at blue count", self.blue_count)
+                                self.blue_count += 1
+                                self.see_peduckstrian_timer = time.time()
+                                self.disable_drive = True
+                                return None, [], False, True, None
+                elif self.blue_count == 2: # looking for broken bot
+                    blue_mask = cv2.inRange(hsv, BLUE_MASK[0], BLUE_MASK[1])
+                    blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    large_blue_contours = [cnt for cnt in blue_contours if cv2.contourArea(cnt) > 100]
+                    num_large_blue = len(large_blue_contours)
 
-            if not bot_detected and not self.manuvering:
-                self.blue_lower = np.array([100, 150, 50], np.uint8)  
-                self.blue_upper = np.array([115, 255, 255], np.uint8)
+                    if num_large_blue > 0:
+                        print(cv2.contourArea(large_blue_contours[0]))
+                        # print('seen blue', num_large_blue)
+                        self.disable_drive = True
+                        return None, [], False, True, blue_mask
 
-                blueline_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+            # bot_detected = self.detect_bot(crop)
+            # if bot_detected:
+            #     self.manuvering = True
 
-                blueline_contours, _ = cv2.findContours(blueline_mask, 
-                                                cv2.RETR_TREE, 
-                                                cv2.CHAIN_APPROX_SIMPLE)
-                if self.seen_line == 2:
-                    if len(blueline_contours) == 0:
-                        self.seen_line = 0
-                    else:
-                        return None, [], False, False
+            # if not bot_detected and not self.manuvering:
+            #     self.blue_lower = np.array([100, 150, 50], np.uint8)  
+            #     self.blue_upper = np.array([115, 255, 255], np.uint8)
 
-                for point in blueline_contours:
-                    x, y = point[0][0]
-                    if y >= 0.45 * self.h:
-                        print("GOT IN BLUE LINE")
-                        self.seen_line = 1
-                        self.blueline_start_time = time.time()
-                        self.blueline_stop = True
-                        break
+            #     blueline_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+
+            #     blueline_contours, _ = cv2.findContours(blueline_mask, 
+            #                                     cv2.RETR_TREE, 
+            #                                     cv2.CHAIN_APPROX_SIMPLE)
+            #     if self.seen_line == 2:
+            #         if len(blueline_contours) == 0:
+            #             self.seen_line = 0
+            #         else:
+            #             return None, [], False, True
+
+            #     for point in blueline_contours:
+            #         x, y = point[0][0]
+            #         if y >= 0.7 * self.h:
+            #             print("GOT IN BLUE LINE")
+            #             self.seen_line = 1
+            #             self.blueline_start_time = time.time()
+            #             self.blueline_stop = True
+            #             break
 
                 
         max_area = 20
@@ -419,7 +501,7 @@ class LaneFollowNode(DTROS):
             except Exception as e:
                 self.logwarn(f"Error in contour processing: {e}")
         
-        return proportional, multiple_points, False, False
+        return proportional, multiple_points, False, False, None
     
     def _calculate_pid(self, proportional):
         """Calculate PID control values based on proportional error"""
@@ -537,8 +619,10 @@ class LaneFollowNode(DTROS):
 
     def drive(self):
         '''Lane following'''
+        if self.parking:
+            return
         if self.disable_drive:
-            if not self.bot_detected and not self.manuvering:
+            if not self.manuvering:
                 #stop at crosswalk
                 self.twist.omega = 0
                 self.twist.v = 0
@@ -553,24 +637,22 @@ class LaneFollowNode(DTROS):
                 obj_stop = self.obj_stop
                 if obj_stop:
                     self.obj_stop = False  # immediately clear the stop flag
-                duckie_stop = self.duckie_stop
-                if duckie_stop:
-                    self.duckie_stop = False
+                # duckie_stop = self.duckie_stop
 
-        if obj_stop:
-            self.stop(8)
-            self.red_cooldown_until = time.time() + 10
-            rospy.sleep(1.0)
-            self.next_phase()
-            return
-        elif self.duckie_stop:
-            self.twist.omega = 0
-            self.twist.v = 0
-            self.vel_pub.publish(self.twist)
-            # self.stop(8)
-            # rospy.sleep(1.0)
-            # rospy.sleep(0.5)
-            return
+            if obj_stop:
+                self.stop(16)
+                self.red_cooldown_until = time.time() + 8
+                rospy.sleep(2.0)
+                self.next_phase()
+                return
+            elif self.duckie_stop:
+                self.twist.omega = 0
+                self.twist.v = 0
+                self.vel_pub.publish(self.twist)
+                # self.stop(8)
+                # rospy.sleep(1.0)
+                # rospy.sleep(0.5)
+                return
 
 
             if proportional is None:
@@ -626,7 +708,7 @@ class LaneFollowNode(DTROS):
                     crop = img[300:-1, :, :]  # Standard distance
                     
                 # Process image to find yellow lane
-                proportional, multiple_points, red_detected, self.duckie_stop = self._process_image(crop)
+                proportional, multiple_points, red_detected, self.duckie_stop, _ = self._process_image(crop)
 
                 with self.lock:
                     self.proportional = proportional
@@ -637,10 +719,10 @@ class LaneFollowNode(DTROS):
                 self.move(duration_sec=2.2, direction='right')
             elif self.stage1_phases[self.phase] == 'straight':
                 self.logwarn("performing straight")
-                self.move(duration_sec=3.69, direction='straight')
+                self.move(duration_sec=3, direction='straight')
             elif self.stage1_phases[self.phase] == 'left_turn':
                 self.logwarn("performing left_turn")
-                self.move(duration_sec=3, direction='left')
+                self.move(duration_sec=3.1, direction='left', go_straight=0.5)
             else:
                 self.logwarn("done stage 1")
 
@@ -657,8 +739,6 @@ class LaneFollowNode(DTROS):
                     self.seen_tag = True
                     print(f"saw tag {tags[0].tag_id}")
 
-            print(f"self.phase {self.phase}")
-
             if self.stage2_phases[self.phase] == 'default':
                 # Dynamically adjust look-ahead distance
                 if self.proportional is not None and abs(self.proportional) > self.large_error_threshold:
@@ -667,7 +747,7 @@ class LaneFollowNode(DTROS):
                     crop = img[300:-1, :, :]  # Standard distance
                     
                 # Process image to find yellow lane
-                proportional, multiple_points, red_detected, self.duckie_stop = self._process_image(crop)
+                proportional, multiple_points, red_detected, self.duckie_stop, _ = self._process_image(crop)
 
                 with self.lock:
                     self.proportional = proportional
@@ -678,7 +758,10 @@ class LaneFollowNode(DTROS):
                 self.move(duration_sec=2.2, direction='right')
             elif self.stage2_phases[self.phase] == 'left':
                 self.logwarn("performing left_turn")
-                self.move(duration_sec=2.6, direction='left')
+                if self.last_tag_id == 48:
+                    self.move(duration_sec=2.5, direction='left', go_straight=1.5)
+                else:
+                    self.move(duration_sec=3.1, direction='left', go_straight=0.5)
 
         elif self.stage == 3:
             cut_image = img[:, int(0.5 * self.w):]
@@ -692,41 +775,186 @@ class LaneFollowNode(DTROS):
                     crop = img[300:-1, :, :]  # Standard distance
                     
                 # Process image to find yellow lane
-                proportional, multiple_points, blueline_detected, _ = self._process_image(img)
+                proportional, multiple_points, redline_stop, blueline_stop, blue_mask = self._process_image(crop)
 
-                if self.blueline_stop:
+                if blueline_stop:
                     #saw blue line
-                    print('STOPPING RIGHT NOW')
-                    if self.seen_line == 1:
-                        if time.time() - self.blueline_start_time < 1:
+                    if self.blue_count == 1 or self.blue_count == 4:
+                        if self.detect_peDuckstrians(img):
+                            self.see_peduckstrian_timer = time.time()
                             self.disable_drive = True
-                        else:
-                            self.seen_line = 2
-                            self.disable_drive = False
-                    if self.seen_line == 2:
-                        hsvFrame = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-                        if self.detect_peDuckstrians(hsvFrame):
                             print("SAW YELLOW DUCKS")
-                            self.disable_drive = True
-                        else:
-                            self.blueline_stop = False
+                        elif time.time() - self.see_peduckstrian_timer > 2:
+                            self.blue_timer = time.time()
+                            self.blue_count += 1
                             self.disable_drive = False
+                            self.seen_blue = False
+
+                    elif self.blue_count == 2 and not self.manuvering:
+
+                        self.blue_timer = time.time()
+                        self.manuvering = True
+
                 else:
                     #lane follow
-
                     with self.lock:
                         self.proportional = proportional
                         self.multiple_points = multiple_points
-                        self.obj_stop = blueline_detected
+                        self.obj_stop = redline_stop
 
             elif self.stage3_phases[self.phase] == 'end':
-                return
-            
+                self.move(duration_sec=0.2, direction='straight')
+
+        elif self.stage == 4:
+            if self.phase == 2:
+                self.zone = (self.zone + 1)%5
+                if self.zone == 0:
+                    self.zone = 1
+                self.reset_timer = time.time()
+                print('NEW ZONE, GO GO GO GO')
+                self.phase = 0
+                
+            else:
+                if time.time() - self.reset_timer < 6:
+                    return
+                elif time.time() - self.reset_timer < 6.1:
+                    self.disable_drive = False
+                gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+                if self.zone == 1 or self.zone == 4:
+                    self.offset = -10
+                    #cut right part
+
+                    crop = img[300:-1, 430:-1, :]  # Standard distance
+                else:
+                    self.offset = 20
+                    #cut left part
+
+                    crop = img[300:-1, 0:210, :]  # Standard distance
+
+                if self.stage4_phases[self.phase] == 'park':
+                    self.park(zone=self.zone)
+                    self.park_timer = time.time()
+                elif self.stage4_phases[self.phase] == 'follow':
+                    self.base_velocity = 0.17
+
+                    if time.time() - self.tag_timer > 0.3:
+                        # Check for AprilTags during parking follow phase
+                        tags = self.at_detector.detect(gray_image, estimate_tag_pose=False, camera_params=None, tag_size=None)
+                        
+                        # If tags found, check size
+                        if len(tags) > 0:
+                            tag = tags[0]
+                            # Calculate tag size (area of bounding box)
+                            corners = tag.corners
+                            x_min = min(corners[:, 0])
+                            x_max = max(corners[:, 0])
+                            y_min = min(corners[:, 1])
+                            y_max = max(corners[:, 1])
+                            
+                            tag_width = x_max - x_min
+                            tag_height = y_max - y_min
+                            tag_area = tag_width * tag_height
+                            
+                            # print(f"AprilTag detected with area: {tag_area}")
+                            
+                            # If tag is large enough, we're close enough to stop
+                            if tag_area > 20000:  # Adjust threshold as needed
+                                print("Tag large enough, stopping. PARKED!!!!!!!!!!!!")
+                                self.disable_drive = True
+                                self.phase += 1
+                                return
+                        
+                    if time.time() - self.park_timer > 10:
+                        print("Timer hit. PARKED!!!!!!!!!!!!")
+                        self.disable_drive = True
+                        self.phase += 1
+                    print('lane following now!!!')
+                    proportional, multiple_points, redline_stop, blueline_stop, blue_mask = self._process_image(crop, img)
+                    with self.lock:
+                        self.proportional = proportional
+                        self.multiple_points = multiple_points
+
         # Publish debug image if needed
-        if DEBUG:
-            crop = img[300:-1, :, :]
-            rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(crop))
-            self.pub.publish(rect_img_msg)
+        # rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(crop))
+        # self.pub.publish(rect_img_msg)
+
+    def park(self, zone=1):
+        """Perform a turning maneuver using angular velocity."""
+        self.parking = True
+        self.twist.v = 0.3
+        print(f"turning to park for zone {zone}")
+        start_time = rospy.get_time()
+
+        """going straigh is -0.65, add to all angles"""
+        # left is positive
+        # right is negative
+        self.twist.omega = 4
+        self.twist.v = 0.4
+        while rospy.get_time() - start_time < 0.2 and not rospy.is_shutdown():
+            self.vel_pub.publish(self.twist)
+            rospy.sleep(0.1)  # control frequency ~10Hz
+        start_time = rospy.get_time()
+
+        self.twist.v = 0.3
+        if zone == 1:
+            self.twist.omega = -2.9
+            while rospy.get_time() - start_time < 2.5 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+
+        elif zone == 2:
+            self.twist.omega = 0.3
+            while rospy.get_time() - start_time < 0.7 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            start_time = rospy.get_time()
+
+            self.twist.omega = -3.0
+            while rospy.get_time() - start_time < 2.7 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+
+        elif zone == 3:
+            self.twist.omega = 3.2
+            while rospy.get_time() - start_time < 2.7 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            start_time = rospy.get_time()
+
+            self.twist.omega = -0.65
+            while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            
+        elif zone == 4:
+            self.twist.omega = 3.6
+            while rospy.get_time() - start_time < 1.8 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            start_time = rospy.get_time()
+
+            self.twist.omega = 2
+            while rospy.get_time() - start_time < 0.5 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            start_time = rospy.get_time()
+
+            self.twist.omega = -0.65
+            while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+
+            # self.twist.omega = -0.65
+            # while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
+            #     self.vel_pub.publish(self.twist)
+            #     rospy.sleep(0.1)  # control frequency ~10Hz
+
+        # Stop briefly after turn
+        self.stop(4)
+        self.parking = False
+        self.phase += 1
+        return True  # signal that turn is complete
     
     def react_to_detection(self, tag_id):
         if tag_id == 48:
@@ -734,20 +962,26 @@ class LaneFollowNode(DTROS):
         # else:
         #     self.stage2_phases = ['default', 'right', 'left']  # turning right
 
-    def move(self, duration_sec=1.5, direction='right'):
+    def move(self, duration_sec=1.5, direction='right', go_straight=0):
         """Perform a turning maneuver using angular velocity."""
         turn_twist = Twist2DStamped()
-        print(f"direction {direction}")
+        print(f"direction changed {direction}")
 
         # Set base turning parameters
         if direction == 'right':
             turn_twist.v = self.base_velocity * 1.51
             turn_twist.omega = -4.5  # right turn (omega < 0)
         elif direction == 'left':
-            turn_twist.v = self.base_velocity * 1.45
-            turn_twist.omega = 3.5  # left turn (omega > 0)
+            turn_twist.v = self.base_velocity * 1.63
+            turn_twist.omega = -0.5 # straight
+            start_time = rospy.get_time()
+            while rospy.get_time() - start_time < go_straight and not rospy.is_shutdown():
+                self.vel_pub.publish(turn_twist)
+                rospy.sleep(0.1)
+            turn_twist.v = self.base_velocity * 1.5
+            turn_twist.omega = 3.7  # left turn (omega > 0)
         else:
-            turn_twist.v = self.base_velocity * 1.4
+            turn_twist.v = self.base_velocity * 1.63
             turn_twist.omega = -0.5 # straight
 
         # Get current time and spin for a fixed duration
@@ -762,8 +996,12 @@ class LaneFollowNode(DTROS):
         print(f"done with {direction}")
         if self.stage == 1 and self.max_phase == 3:
             self.next_stage()
+            self.publish_leds([0, 0, 0])
 
         if self.stage == 2 and self.max_phase == 2:
+            self.next_stage()
+
+        if self.stage == 3 and self.max_phase == 1:
             self.next_stage()
 
         return True  # signal that turn is complete
@@ -773,10 +1011,12 @@ class LaneFollowNode(DTROS):
         self.phase = self.max_phase
 
     def next_stage(self):
-        print(f"entered new stage {self.stage}")
         self.stage += 1
+        print(f"entered new stage {self.stage}")
         self.phase = 0
         self.max_phase = 0
+        if self.stage == 3:
+            self.blue_timer = time.time()
 
     def get_grid_dimensions(self, corners):
         # corners is the array returned by cv2.findCirclesGrid
@@ -793,106 +1033,51 @@ class LaneFollowNode(DTROS):
         
         return width, height
 
-    def detect_bot(self, image_cv):
-        """
-        Callback for processing a image which potentially contains a back pattern. Processes the image only if
-        sufficient time has passed since processing the previous image (relative to the chosen processing frequency).
-
-        The pattern detection is performed using OpenCV's `findCirclesGrid <https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html?highlight=solvepnp#findcirclesgrid>`_ function.
-
-        Args:
-            image_msg (:obj:`sensor_msgs.msg.CompressedImage`): Input image
-
-        """
-        now = rospy.Time.now()
-        if now - self.last_stamp < self.publish_duration:
-            return
-        else:
-            self.last_stamp = now
-
-        (detection, centers) = cv2.findCirclesGrid(
-            image_cv,
-            patternSize=tuple(self.circlepattern_dims),
-            flags=cv2.CALIB_CB_SYMMETRIC_GRID,
-            blobDetector=self.simple_blob_detector,
-        )
-
-        # if the detection is successful add the information about it,
-        # otherwise publish a message saying that it was unsuccessful
-        if detection > 0:
-            points_list = []
-            for point in centers:
-                center = Point32()
-                center.x = point[0, 0]
-                center.y = point[0, 1]
-                center.z = 0
-                points_list.append(center)
-        
-        if detection > 0:
-            return np.max(centers) - np.min(centers) > 250
-        return False
-
     def manuver_around_bot(self):
-        print("MANUEVERING...")
         self.state_time += 1
-        turn_angle = 10
-        turn_time = 12
-        straight_time = 50
+        turn_angle = 5
         if self.state_time < 5:
             return 0, 0
 
         # wait for 1 second
         if self.manuver_state == 0:
-            if self.state_time > 25:
+            print("start maneuvering...")
+            if self.state_time > 8:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0
             twist = 0
-        # turn to face other lane
+        # turn to face other lane, left
         elif self.manuver_state == 1:
-            if self.state_time > turn_time:
+            if self.state_time > 9:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = -0.25
             twist = turn_angle
         # drive into other lane 
         elif self.manuver_state == 2:
-            if self.state_time > straight_time:
+            if self.state_time > 12:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
             twist = 0
-        # turn to drive past other bot
+        # turn before drive past other bot, right
         elif self.manuver_state == 3:
-            if self.state_time > turn_time:
+            if self.state_time > 8:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
             twist = -turn_angle
         # drive past other bot
         elif self.manuver_state == 4:
-            if self.state_time > straight_time:
+            if self.state_time > 34:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
-            twist = 0
-        # turn back to face proper lane
+            twist = -1.9
+        # turn to lane follow again, left
         elif self.manuver_state == 5:
-            if self.state_time > turn_time:
-                self.manuver_state += 1
-                self.state_time = 0
-            vel = 0.25
-            twist = -turn_angle
-        # drive into proper lane
-        elif self.manuver_state == 6:
-            if self.state_time > straight_time:
-                self.manuver_state += 1
-                self.state_time = 0
-            vel = 0.25
-            twist = 0
-        # turn to face proper direction
-        elif self.manuver_state == 7:
-            if self.state_time > turn_time:
+            if self.state_time > 8:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
@@ -900,6 +1085,9 @@ class LaneFollowNode(DTROS):
         # end manuver
         else:
             self.manuvering = False
+            self.seen_blue = False
+            self.disable_drive = False
+            self.blue_count = 3
             self.state_time = 0
             self.manuver_state = 0
             vel = 0.2
@@ -909,7 +1097,14 @@ class LaneFollowNode(DTROS):
 
 
 if __name__ == "__main__":
-    node = LaneFollowNode("lanefollow_node")
+    parser = argparse.ArgumentParser(description='Lane following node')
+    parser.add_argument('--zone', type=int, help='zone for parking')
+
+    args = parser.parse_args()
+
+    print(f"Zone argument received: {args.zone}")
+
+    node = LaneFollowNode("lanefollow_node", zone=args.zone)
     rate = rospy.Rate(8)  # 8hz
     while not rospy.is_shutdown():
         node.drive()

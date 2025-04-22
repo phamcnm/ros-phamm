@@ -6,7 +6,7 @@ source /environment.sh
 dt-launchfile-init
 
 # launching app
-rosrun final final.py
+rosrun final final.py --zone 2
 # TBA
 
 # ----------------------------------------------------------------------------

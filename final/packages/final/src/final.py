@@ -32,7 +32,7 @@ class BlueTurnDetector:
         self.prev_centers = deque(maxlen=history_len)  # store past center x positions
 
     def detect_blue_turn(self, img):
-        print('in detect blue turn')
+        # print('in detect blue turn')
         hsv_full = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         blue_mask = cv2.inRange(hsv_full, np.array(BLUE_MASK[0]), np.array(BLUE_MASK[1]))
         blue_contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -49,7 +49,7 @@ class BlueTurnDetector:
             return None
 
         cx = int(M["m10"] / M["m00"])
-        print(f"cx {cx}")
+        # print(f"cx {cx}")
         self.prev_centers.append(cx)
         return None  # only make decision in next_phase()
 
@@ -154,8 +154,8 @@ class LaneFollowNode(DTROS):
 
         contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 500]
 
-        for c in contours:
-            print(f"cv2.contourArea(cnt) {cv2.contourArea(c)}")
+        # for c in contours:
+        #     print(f"cv2.contourArea(cnt) {cv2.contourArea(c)}")
 
         return len(contours) > 0
 
@@ -270,7 +270,7 @@ class LaneFollowNode(DTROS):
         self.stage1_phases = ['tailing', 'right_turn', 'straight', 'left_turn']
 
         #stage 2 stuff
-        self.stage = 4
+        self.stage = 1
 
         self.stage2_phases = ['default', 'right', 'left']
         self.seen_tag = False
@@ -328,8 +328,8 @@ class LaneFollowNode(DTROS):
             num_large_blue = len(large_blue_contours)
             
             if num_large_blue > 0:
-                print(cv2.contourArea(large_blue_contours[0]))
-                print('seen blue', num_large_blue)
+                # print(cv2.contourArea(large_blue_contours[0]))
+                # print('seen blue', num_large_blue)
                 self.disable_drive = True
                 self.tailing_timer = time.time()
                 if self.current_leds != [1, 0, 0]:
@@ -347,7 +347,7 @@ class LaneFollowNode(DTROS):
                 self.last_stamp = now
             
             if self.blue_count == 1 or self.blue_count == 4: # seen blue line, but waiting for pedestrian
-                print("blue detected at blue count, waiting!!!!,", self.blue_count)
+                # print("blue detected at blue count, waiting!!!!,", self.blue_count)
                 return None, [], False, True, None
             elif time.time() - self.blue_timer > 5:
                 if self.blue_count == 0 or self.blue_count == 3: 
@@ -360,7 +360,7 @@ class LaneFollowNode(DTROS):
                         for point in contour:
                             x, y = point[0]
                             if y >= 0.7 * crop_height:
-                                print("blue detected at blue count", self.blue_count)
+                                # print("blue detected at blue count", self.blue_count)
                                 self.blue_count += 1
                                 self.see_peduckstrian_timer = time.time()
                                 self.disable_drive = True
@@ -372,7 +372,7 @@ class LaneFollowNode(DTROS):
                     num_large_blue = len(large_blue_contours)
 
                     if num_large_blue > 0:
-                        print(cv2.contourArea(large_blue_contours[0]))
+                        # print(cv2.contourArea(large_blue_contours[0]))
                         # print('seen blue', num_large_blue)
                         self.disable_drive = True
                         return None, [], False, True, blue_mask
@@ -662,11 +662,11 @@ class LaneFollowNode(DTROS):
                 self.move(duration_sec=2.2, direction='right')
             elif self.stage1_phases[self.phase] == 'straight':
                 self.logwarn("performing straight")
-                self.move(duration_sec=3, direction='straight')
+                self.move(duration_sec=3.7, direction='straight')
             elif self.stage1_phases[self.phase] == 'left_turn':
                 self.logwarn("performing left_turn")
                 if self.phase == 1:
-                    self.move(duration_sec=2.8, direction='left', go_straight=0.9)
+                    self.move(duration_sec=2.6, direction='left', go_straight=0.85)
                 else:
                     self.move(duration_sec=3.1, direction='left', go_straight=0.5)
             else:
@@ -704,10 +704,10 @@ class LaneFollowNode(DTROS):
                 self.move(duration_sec=2.2, direction='right')
             elif self.stage2_phases[self.phase] == 'left':
                 self.logwarn("performing left_turn")
-                if self.last_tag_id == 48:
-                    self.move(duration_sec=2.5, direction='left', go_straight=1.5)
-                else:
-                    self.move(duration_sec=3.0, direction='left', go_straight=0.8)
+                if self.last_tag_id == 48: # left, right
+                    self.move(duration_sec=2.6, direction='left', go_straight=1.2)
+                else: #right, left
+                    self.move(duration_sec=2.75, direction='left', go_straight=1.0)
 
         elif self.stage == 3:
             cut_image = img[:, int(0.5 * self.w):]
@@ -729,7 +729,7 @@ class LaneFollowNode(DTROS):
                         if self.detect_peDuckstrians(img):
                             self.see_peduckstrian_timer = time.time()
                             self.disable_drive = True
-                            print("SAW YELLOW DUCKS")
+                            # print("SAW YELLOW DUCKS")
                         elif time.time() - self.see_peduckstrian_timer > 2:
                             self.blue_timer = time.time()
                             self.blue_count += 1
@@ -740,6 +740,10 @@ class LaneFollowNode(DTROS):
 
                         self.blue_timer = time.time()
                         self.manuvering = True
+
+                    # if self.blue_count == 5:
+                    #     print('increasing speed')
+                    #     self.base_velocity = 0.3
 
                 else:
                     #lane follow
@@ -753,36 +757,37 @@ class LaneFollowNode(DTROS):
 
         elif self.stage == 4:
             if self.phase == 2:
-                self.zone = (self.zone + 1)%5
-                if self.zone == 0:
-                    self.zone = 1
-                self.reset_timer = time.time()
-                print('NEW ZONE, GO GO GO GO')
-                self.phase = 0
+                rospy.signal_shutdown("Finished")
+                # self.zone = (self.zone + 1)%5
+                # if self.zone == 0:
+                #     self.zone = 1
+                # self.reset_timer = time.time()
+                # print('NEW ZONE, GO GO GO GO')
+                # self.phase = 0
                 
             else:
-                if time.time() - self.reset_timer < 6:
-                    return
-                elif time.time() - self.reset_timer < 6.1:
-                    self.disable_drive = False
+                # if time.time() - self.reset_timer < 6:
+                #     return
+                # elif time.time() - self.reset_timer < 6.1:
+                #     self.disable_drive = False
                 gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
                 if self.zone == 1 or self.zone == 4:
-                    self.offset = -10
+                    self.offset = -8
                     #cut right part
 
-                    crop = img[300:-1, 430:-1, :]  # Standard distance
+                    crop = img[350:-1, 430:-1, :]  # Standard distance
                 else:
                     self.offset = 20
                     #cut left part
 
-                    crop = img[300:-1, 0:210, :]  # Standard distance
+                    crop = img[350:-1, 0:210, :]  # Standard distance
 
                 if self.stage4_phases[self.phase] == 'park':
                     self.park(zone=self.zone)
                     self.park_timer = time.time()
                 elif self.stage4_phases[self.phase] == 'follow':
-                    self.base_velocity = 0.17
+                    self.base_velocity = 0.135
 
                     if time.time() - self.tag_timer > 0.3:
                         # Check for AprilTags during parking follow phase
@@ -811,11 +816,11 @@ class LaneFollowNode(DTROS):
                                 self.phase += 1
                                 return
                         
-                    if time.time() - self.park_timer > 10:
+                    if time.time() - self.park_timer > 12:
                         print("Timer hit. PARKED!!!!!!!!!!!!")
                         self.disable_drive = True
                         self.phase += 1
-                    print('lane following now!!!')
+                    # print('lane following now!!!')
                     proportional, multiple_points, redline_stop, blueline_stop, blue_mask = self._process_image(crop, img)
                     with self.lock:
                         self.proportional = proportional
@@ -828,93 +833,68 @@ class LaneFollowNode(DTROS):
     def park(self, zone=1):
         """Perform a turning maneuver using angular velocity."""
         self.parking = True
-        self.twist.v = 0.3
         print(f"turning to park for zone {zone}")
-        start_time = rospy.get_time()
 
         """going straigh is -0.65, add to all angles"""
         # left is positive
         # right is negative
-        self.twist.omega = 4
-        self.twist.v = 0.4
-        while rospy.get_time() - start_time < 0.2 and not rospy.is_shutdown():
-            self.vel_pub.publish(self.twist)
-            rospy.sleep(0.1)  # control frequency ~10Hz
+
+        # self.twist.omega = 4
+        # self.twist.v = 0.4
+        # while rospy.get_time() - start_time < 0.2 and not rospy.is_shutdown():
+        #     self.vel_pub.publish(self.twist)
+        #     rospy.sleep(0.1)  # control frequency ~10Hz
+        # start_time = rospy.get_time()
+
         start_time = rospy.get_time()
+        self.twist.v = 0.25
 
-        self.twist.v = 0.3
         if zone == 1:
-            self.twist.omega = -2.9
-            while rospy.get_time() - start_time < 2.5 and not rospy.is_shutdown():
-                self.vel_pub.publish(self.twist)
-                rospy.sleep(0.1)  # control frequency ~10Hz
-
-        elif zone == 2:
-            self.twist.omega = 0.3
-            while rospy.get_time() - start_time < 0.7 and not rospy.is_shutdown():
+            self.twist.omega = 3
+            while rospy.get_time() - start_time < 0.3 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
             start_time = rospy.get_time()
 
-            self.twist.omega = -3.0
-            while rospy.get_time() - start_time < 2.7 and not rospy.is_shutdown():
+            self.twist.omega = -3.8
+            while rospy.get_time() - start_time < 2.0 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+
+        elif zone == 2:
+            self.twist.omega = 0.6
+            while rospy.get_time() - start_time < 1.6 and not rospy.is_shutdown():
+                self.vel_pub.publish(self.twist)
+                rospy.sleep(0.1)  # control frequency ~10Hz
+            start_time = rospy.get_time()
+
+            self.twist.omega = -3.8
+            while rospy.get_time() - start_time < 2.0 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
 
         elif zone == 3:
-
-            #old zone 3
-            # self.twist.omega = 3.2
-            # while rospy.get_time() - start_time < 2.7 and not rospy.is_shutdown():
-            #     self.vel_pub.publish(self.twist)
-            #     rospy.sleep(0.1)  # control frequency ~10Hz
-            # start_time = rospy.get_time()
-
-            # self.twist.omega = -0.65
-            # while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
-            #     self.vel_pub.publish(self.twist)
-            #     rospy.sleep(0.1)  # control frequency ~10Hz
-
-            self.twist.omega = 4
-            while rospy.get_time() - start_time < 2 and not rospy.is_shutdown():
+            self.twist.omega = 4.05
+            while rospy.get_time() - start_time < 2.4 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
             start_time = rospy.get_time()
 
             self.twist.omega = -0.65
-            while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
+            while rospy.get_time() - start_time < 0.8 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
             
             
         elif zone == 4:
-
-            #old zone 4
-            # self.twist.omega = 3.6
-            # while rospy.get_time() - start_time < 1.8 and not rospy.is_shutdown():
-            #     self.vel_pub.publish(self.twist)
-            #     rospy.sleep(0.1)  # control frequency ~10Hz
-            # start_time = rospy.get_time()
-
-            # self.twist.omega = 2
-            # while rospy.get_time() - start_time < 0.5 and not rospy.is_shutdown():
-            #     self.vel_pub.publish(self.twist)
-            #     rospy.sleep(0.1)  # control frequency ~10Hz
-            # start_time = rospy.get_time()
-
-            # self.twist.omega = -0.65
-            # while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
-            #     self.vel_pub.publish(self.twist)
-            #     rospy.sleep(0.1)  # control frequency ~10Hz
-
-            self.twist.omega = 3.2
-            while rospy.get_time() - start_time < 2.7 and not rospy.is_shutdown():
+            self.twist.omega = 3.1
+            while rospy.get_time() - start_time < 2.9 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
             start_time = rospy.get_time()
 
-            self.twist.omega = -0.65
-            while rospy.get_time() - start_time < 1 and not rospy.is_shutdown():
+            self.twist.omega = -0.6
+            while rospy.get_time() - start_time < 0.8 and not rospy.is_shutdown():
                 self.vel_pub.publish(self.twist)
                 rospy.sleep(0.1)  # control frequency ~10Hz
             
@@ -923,6 +903,7 @@ class LaneFollowNode(DTROS):
         self.stop(4)
         self.parking = False
         self.phase += 1
+        self.base_velocity = 0.135
         return True  # signal that turn is complete
     
     def react_to_detection(self, tag_id):
@@ -972,6 +953,10 @@ class LaneFollowNode(DTROS):
 
         if self.stage == 3 and self.max_phase == 1:
             self.next_stage()
+
+        if self.stage > 1:
+            self.publish_leds([0, 0, 0])
+
 
         return True  # signal that turn is complete
 
@@ -1038,21 +1023,21 @@ class LaneFollowNode(DTROS):
             twist = 0
         # turn before drive past other bot, right
         elif self.manuver_state == 3:
-            if self.state_time > 8:
+            if self.state_time > 9:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
             twist = -turn_angle
         # drive past other bot
         elif self.manuver_state == 4:
-            if self.state_time > 34:
+            if self.state_time > 32:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
             twist = -1.9
         # turn to lane follow again, left
         elif self.manuver_state == 5:
-            if self.state_time > 8:
+            if self.state_time > 6:
                 self.manuver_state += 1
                 self.state_time = 0
             vel = 0.25
